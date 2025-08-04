@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Origin", "https://www.eatfare.com");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -7,94 +7,95 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const { sku } = req.query;
-  const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-  const BASE_ID = 'appXXDxqsKzF2RoF4';
-  const PRODUCE_TABLE = 'Produce';
-  const CLAIMS_TABLE = 'Nutrient Claims';
-
-  if (!sku) {
-    return res.status(400).json({ error: "Missing SKU in query" });
-  }
+  const sku = req.query.sku;
+  const airtableApiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = "appqVG3KsoAa1eRai";
+  const produceTable = "Produce";
+  const claimsTable = "Nutrient Claims";
 
   try {
-    // 1. Get the Produce record by SKU
-    const produceResp = await fetch(`https://api.airtable.com/v0/${BASE_ID}/${PRODUCE_TABLE}?filterByFormula={SKU}="${sku}"`, {
-      headers: {
-        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-      },
-    });
-
-    const produceData = await produceResp.json();
-    const record = produceData.records[0];
-
-    if (!record) {
-      return res.status(404).json({ error: "SKU not found" });
-    }
-
-    const comparisonText = record.fields["Nutrient Comparison"];
-    if (!comparisonText) {
-      return res.status(404).json({ error: "Nutrient Comparison field missing" });
-    }
-
-    // 2. Parse Nutrient Comparison
-    const lines = comparisonText.split("\n");
-    const parsed = lines.map((line) => {
-      const [name, rest] = line.split(": ");
-      const isHigher = rest.includes("⬆️");
-      const value = parseFloat(rest.match(/[\d.]+/g)?.[0] || "0");
-      return { name: name.trim(), line, isHigher, value };
-    });
-
-    // 3. Prioritize highest values that are "higher"
-    const topTwo = parsed
-      .filter((p) => p.isHigher)
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 2);
-
-    // If fewer than 2 "higher", backfill with remaining
-    if (topTwo.length < 2) {
-      const remaining = parsed
-        .filter((p) => !topTwo.includes(p))
-        .sort((a, b) => b.value - a.value);
-      while (topTwo.length < 2 && remaining.length > 0) {
-        topTwo.push(remaining.shift());
+    // STEP 1 – Fetch Produce row by SKU
+    const produceRes = await fetch(
+      `https://api.airtable.com/v0/${baseId}/${produceTable}?filterByFormula={SKU}="${sku}"`,
+      {
+        headers: {
+          Authorization: `Bearer ${airtableApiKey}`,
+        },
       }
+    );
+
+    const produceData = await produceRes.json();
+    if (!produceData.records.length) {
+      return res.status(404).json({ error: "SKU not found." });
     }
 
-    // 4. Look up nutrient icons + headlines from Nutrient Claims
-    const nutrientQuery = `OR(${topTwo.map(n => `{Name}="${n.name}"`).join(",")})`;
-    const claimsResp = await fetch(`https://api.airtable.com/v0/${BASE_ID}/${CLAIMS_TABLE}?filterByFormula=${encodeURIComponent(nutrientQuery)}`, {
-      headers: {
-        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-      },
-    });
-    const claimsData = await claimsResp.json();
+    const nutrientComparison = produceData.records[0].fields["Nutrient Comparison"];
+    if (!nutrientComparison) {
+      return res.status(200).json({ sku, topNutrients: [] });
+    }
 
-    const claimsMap = {};
-    claimsData.records.forEach(rec => {
-      claimsMap[rec.fields["Name"]] = {
-        icon: rec.fields["Icon"] || "",
-        header1: rec.fields["Header 1"] || "",
-        header2: rec.fields["Header 2"] || "",
-      };
-    });
+    // STEP 2 – Parse Comparison string
+    const lines = nutrientComparison.trim().split("\n");
+    const parsed = lines
+      .map((line) => {
+        const match = line.match(/^(.+?): (.+?) \(([^)]+) baseline (.+)\)$/);
+        if (!match) return null;
+        const [, name, value, symbol, baseline] = match;
+        return {
+          name: name.trim(),
+          symbol,
+          delta: parseFloat(value) - parseFloat(baseline),
+          original: line,
+        };
+      })
+      .filter(Boolean);
 
-    const topNutrients = topTwo.map((nutrient) => {
-      const claim = claimsMap[nutrient.name] || {};
+    // STEP 3 – Choose top 2 nutrients (prefer higher)
+    let top = parsed.filter((n) => n.symbol.includes("higher"));
+    if (top.length < 2) {
+      const others = parsed.filter((n) => !n.symbol.includes("higher"));
+      others.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta));
+      top = [...top, ...others.slice(0, 2 - top.length)];
+    } else {
+      top.sort((a, b) => b.delta - a.delta);
+    }
+    top = top.slice(0, 2);
+
+    // STEP 4 – Fetch all nutrient claims
+    const claimsRes = await fetch(
+      `https://api.airtable.com/v0/${baseId}/${claimsTable}`,
+      {
+        headers: {
+          Authorization: `Bearer ${airtableApiKey}`,
+        },
+      }
+    );
+
+    const claimsData = await claimsRes.json();
+
+    // STEP 5 – Enrich top nutrients with claim data
+    const topNutrients = top.map((item) => {
+      const match = claimsData.records.find((r) => {
+        return r.fields["Name"]?.toLowerCase().trim() === item.name.toLowerCase().trim();
+      });
+
+      const isHigher = item.symbol.includes("higher");
+
       return {
-        nutrient: nutrient.name,
-        headline: nutrient.isHigher ? claim.header1 : claim.header2 || "",
-        icon: claim.icon || "",
+        nutrient: item.name,
+        headline: match
+          ? isHigher
+            ? match.fields["Header 1"]
+            : match.fields["Header 2"]
+          : `${item.name} level ${item.symbol}`,
+        icon: match?.fields["Icon"]?.[0]?.url || "",
+        details: match?.fields["Details"] || "",
       };
     });
 
-    return res.status(200).json({
-      sku,
-      topNutrients,
-    });
+    return res.status(200).json({ sku, topNutrients });
   } catch (err) {
     console.error("❌ ERROR:", err);
-    return res.status(500).json({ error: "Internal Server Error", detail: err.message });
+    return res.status(500).json({ error: "Internal Server Error" });
   }
 }
