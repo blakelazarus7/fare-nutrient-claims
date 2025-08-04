@@ -1,56 +1,100 @@
 export default async function handler(req, res) {
-  console.log("🔥 GET /api/getClaims called");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  const { sku } = req.query;
-  console.log("🔍 SKU param:", sku);
-
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = "appXXDxqsKzF2RoF4";
-  const tableName = "Produce";
-
-  if (!sku || !apiKey) {
-    console.error("❌ Missing SKU or API key");
-    return res.status(400).json({ error: "Missing SKU or Airtable API key." });
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  const airtableUrl = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?filterByFormula=({SKU}="${sku}")`;
+  const { sku } = req.query;
+  const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+  const BASE_ID = 'appXXDxqsKzF2RoF4';
+  const PRODUCE_TABLE = 'Produce';
+  const CLAIMS_TABLE = 'Nutrient Claims';
 
-  console.log("🌐 Airtable URL:", airtableUrl);
+  if (!sku) {
+    return res.status(400).json({ error: "Missing SKU in query" });
+  }
 
   try {
-    const airtableRes = await fetch(airtableUrl, {
+    // 1. Get the Produce record by SKU
+    const produceResp = await fetch(`https://api.airtable.com/v0/${BASE_ID}/${PRODUCE_TABLE}?filterByFormula={SKU}="${sku}"`, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
       },
     });
 
-    const statusCode = airtableRes.status;
-    const body = await airtableRes.text();
-
-    console.log(`📡 Airtable response [${statusCode}]:`, body);
-
-    if (statusCode !== 200) {
-      return res.status(statusCode).json({ error: "Airtable fetch failed", body });
-    }
-
-    const json = JSON.parse(body);
-    const record = json.records?.[0];
+    const produceData = await produceResp.json();
+    const record = produceData.records[0];
 
     if (!record) {
-      console.warn("⚠️ No records returned for that SKU");
-      return res.status(404).json({ error: "SKU not found." });
+      return res.status(404).json({ error: "SKU not found" });
     }
 
-    const fields = record.fields;
-    const nutrientComparison = fields["Nutrient Comparison"];
+    const comparisonText = record.fields["Nutrient Comparison"];
+    if (!comparisonText) {
+      return res.status(404).json({ error: "Nutrient Comparison field missing" });
+    }
+
+    // 2. Parse Nutrient Comparison
+    const lines = comparisonText.split("\n");
+    const parsed = lines.map((line) => {
+      const [name, rest] = line.split(": ");
+      const isHigher = rest.includes("⬆️");
+      const value = parseFloat(rest.match(/[\d.]+/g)?.[0] || "0");
+      return { name: name.trim(), line, isHigher, value };
+    });
+
+    // 3. Prioritize highest values that are "higher"
+    const topTwo = parsed
+      .filter((p) => p.isHigher)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 2);
+
+    // If fewer than 2 "higher", backfill with remaining
+    if (topTwo.length < 2) {
+      const remaining = parsed
+        .filter((p) => !topTwo.includes(p))
+        .sort((a, b) => b.value - a.value);
+      while (topTwo.length < 2 && remaining.length > 0) {
+        topTwo.push(remaining.shift());
+      }
+    }
+
+    // 4. Look up nutrient icons + headlines from Nutrient Claims
+    const nutrientQuery = `OR(${topTwo.map(n => `{Name}="${n.name}"`).join(",")})`;
+    const claimsResp = await fetch(`https://api.airtable.com/v0/${BASE_ID}/${CLAIMS_TABLE}?filterByFormula=${encodeURIComponent(nutrientQuery)}`, {
+      headers: {
+        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+      },
+    });
+    const claimsData = await claimsResp.json();
+
+    const claimsMap = {};
+    claimsData.records.forEach(rec => {
+      claimsMap[rec.fields["Name"]] = {
+        icon: rec.fields["Icon"] || "",
+        header1: rec.fields["Header 1"] || "",
+        header2: rec.fields["Header 2"] || "",
+      };
+    });
+
+    const topNutrients = topTwo.map((nutrient) => {
+      const claim = claimsMap[nutrient.name] || {};
+      return {
+        nutrient: nutrient.name,
+        headline: nutrient.isHigher ? claim.header1 : claim.header2 || "",
+        icon: claim.icon || "",
+      };
+    });
 
     return res.status(200).json({
       sku,
-      comparison: nutrientComparison || "No nutrient data available.",
+      topNutrients,
     });
   } catch (err) {
-    console.error("💥 Exception thrown:", err);
-    return res.status(500).json({ error: "Server crash", message: err.message });
+    console.error("❌ ERROR:", err);
+    return res.status(500).json({ error: "Internal Server Error", detail: err.message });
   }
 }
