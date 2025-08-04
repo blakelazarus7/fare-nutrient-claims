@@ -14,6 +14,8 @@ export default async function handler(req, res) {
   const claimsTable = "Nutrient Claims";
 
   try {
+    console.log("🔍 SKU:", skuSlug);
+
     const fetchProduce = await fetch(
       `https://api.airtable.com/v0/${baseId}/${produceTable}?filterByFormula={SKU}='${skuSlug}'`,
       {
@@ -22,8 +24,9 @@ export default async function handler(req, res) {
         },
       }
     );
-
     const produceData = await fetchProduce.json();
+    console.log("📦 Produce response:", produceData);
+
     if (!produceData.records.length) {
       return res.status(404).json({ error: "SKU not found." });
     }
@@ -48,6 +51,8 @@ export default async function handler(req, res) {
       })
       .filter(Boolean);
 
+    console.log("🧪 Parsed Comparisons:", parsed);
+
     let top = parsed.filter((n) => n.symbol.includes("higher"));
     if (top.length < 2) {
       const others = parsed.filter((n) => !n.symbol.includes("higher"));
@@ -57,32 +62,36 @@ export default async function handler(req, res) {
       top.sort((a, b) => b.delta - a.delta);
     }
     top = top.slice(0, 2);
+    console.log("🏆 Top 2 Nutrients:", top);
 
     const fetchClaims = await fetch(`https://api.airtable.com/v0/${baseId}/${claimsTable}`, {
       headers: {
         Authorization: `Bearer ${airtableApiKey}`,
       },
     });
-
     const claimsData = await fetchClaims.json();
+    console.log("🧾 Claims Table:", claimsData);
 
-    const enriched = top.map((item) => {
-      const match = claimsData.records.find((r) => {
-        return r.fields["Name"]?.toLowerCase().trim() === item.name.toLowerCase().trim();
-      });
-      if (!match) return null;
-      const isHigher = item.symbol.includes("higher");
-      return {
-        name: item.name,
-        claim: isHigher ? match.fields["Header 1"] : match.fields["Header 2"],
-        details: match.fields["Details"] || "",
-        icon: match.fields["Icon"]?.[0]?.url || null,
-      };
-    }).filter(Boolean);
+    const enriched = top
+      .map((item) => {
+        const match = claimsData.records.find((r) => {
+          return r.fields["Name"]?.toLowerCase().trim() === item.name.toLowerCase().trim();
+        });
+        if (!match) return null;
+        const isHigher = item.symbol.includes("higher");
+        return {
+          name: item.name,
+          claim: isHigher ? match.fields["Header 1"] : match.fields["Header 2"],
+          details: match.fields["Details"] || "",
+          icon: match.fields["Icon"]?.[0]?.url || null,
+        };
+      })
+      .filter(Boolean);
 
+    console.log("🧠 Final Output:", enriched);
     return res.status(200).json({ claims: enriched });
   } catch (err) {
-    console.error(err);
+    console.error("❌ ERROR:", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
