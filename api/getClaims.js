@@ -85,6 +85,7 @@ export default async function handler(req, res) {
         icon: rec.fields["Icon"]?.[0]?.url || "",
         header1: rec.fields["Header 1"] || "",
         header2: rec.fields["Header 2"] || "",
+        details: rec.fields["Details"] || ""
       };
     });
 
@@ -95,6 +96,7 @@ export default async function handler(req, res) {
         nutrient: nutrient.name,
         headline: nutrient.isHigher ? claim.header1 : claim.header2 || "",
         icon: claim.icon || "",
+        details: claim.details || ""
       };
     });
 
