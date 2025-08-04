@@ -14,7 +14,6 @@ export default async function handler(req, res) {
   const claimsTable = "Nutrient Claims";
 
   try {
-    // STEP 1 – Fetch Produce row by SKU
     const produceRes = await fetch(
       `https://api.airtable.com/v0/${baseId}/${produceTable}?filterByFormula={SKU}="${sku}"`,
       {
@@ -25,8 +24,8 @@ export default async function handler(req, res) {
     );
 
     const produceData = await produceRes.json();
-    if (!produceData.records.length) {
-      return res.status(404).json({ error: "SKU not found." });
+    if (!produceData.records || !produceData.records.length) {
+      return res.status(404).json({ error: "SKU not found" });
     }
 
     const nutrientComparison = produceData.records[0].fields["Nutrient Comparison"];
@@ -34,7 +33,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ sku, topNutrients: [] });
     }
 
-    // STEP 2 – Parse Comparison string
     const lines = nutrientComparison.trim().split("\n");
     const parsed = lines
       .map((line) => {
@@ -45,12 +43,10 @@ export default async function handler(req, res) {
           name: name.trim(),
           symbol,
           delta: parseFloat(value) - parseFloat(baseline),
-          original: line,
         };
       })
       .filter(Boolean);
 
-    // STEP 3 – Choose top 2 nutrients (prefer higher)
     let top = parsed.filter((n) => n.symbol.includes("higher"));
     if (top.length < 2) {
       const others = parsed.filter((n) => !n.symbol.includes("higher"));
@@ -59,9 +55,9 @@ export default async function handler(req, res) {
     } else {
       top.sort((a, b) => b.delta - a.delta);
     }
+
     top = top.slice(0, 2);
 
-    // STEP 4 – Fetch all nutrient claims
     const claimsRes = await fetch(
       `https://api.airtable.com/v0/${baseId}/${claimsTable}`,
       {
@@ -72,10 +68,10 @@ export default async function handler(req, res) {
     );
 
     const claimsData = await claimsRes.json();
+    const claimsRecords = claimsData.records || [];
 
-    // STEP 5 – Enrich top nutrients with claim data
     const topNutrients = top.map((item) => {
-      const match = claimsData.records.find((r) => {
+      const match = claimsRecords.find((r) => {
         return r.fields["Name"]?.toLowerCase().trim() === item.name.toLowerCase().trim();
       });
 
@@ -88,14 +84,14 @@ export default async function handler(req, res) {
             ? match.fields["Header 1"]
             : match.fields["Header 2"]
           : `${item.name} level ${item.symbol}`,
-        icon: match?.fields["Icon"]?.[0]?.url || "",
+        icon: match?.fields["Icon"]?.[0]?.url || "", // ✅ FIXED: Pull webp icon URL
         details: match?.fields["Details"] || "",
       };
     });
 
     return res.status(200).json({ sku, topNutrients });
   } catch (err) {
-    console.error("❌ ERROR:", err);
+    console.error("🔥 ERROR:", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
